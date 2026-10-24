@@ -1428,8 +1428,8 @@ void Controller::music_resume() {
     sendspin_->transport(SendspinService::Transport::PLAY);
 }
 
-// "включи / выключи блютуз" switch the speaker's pairing mode; "включи / выключи свет / телевизор",
-// "лайк" and "дизлайк" go to Home Assistant as events of the «Voice command» entity.
+// "включи / выключи блютуз" switches the speaker's pairing mode; "лайк" and "дизлайк"
+// go to Home Assistant as events of the «Voice command» entity.
 bool Controller::extra_command(const std::string &word) {
   if (Loop::now_ms() < commands_blocked_until_ms_ || arbitrating_) return false;
   const bool off = word.find("выключи") != std::string::npos;
@@ -1441,10 +1441,11 @@ bool Controller::extra_command(const std::string &word) {
     bt_->set_pairing(on);
     return true;
   }
+  // Light and TV commands must reach the HA pipeline with their room/entity: the local
+  // command spotter hears only the first words and would cancel the dialog before "в зале".
+  if (has("свет") || has("телевизор")) return false;
   const char *ev = nullptr;
-  if (has("свет")) ev = on ? "light_on" : off ? "light_off" : nullptr;
-  else if (has("телевизор")) ev = on ? "tv_on" : off ? "tv_off" : nullptr;
-  else if (word == "лайк") ev = "like";
+  if (word == "лайк") ev = "like";
   else if (word == "дизлайк") ev = "dislike";
   if (!ev) return false;
   LOGI("voice command '%s' -> event %s", word.c_str(), ev);
