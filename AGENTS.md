@@ -26,12 +26,12 @@ UDP broadcast (port 6054) so that only the one that heard it loudest answers.
 | `satellite/src/sendspin/` | Sendspin player on top of sendspin-cpp, own ALSA sink on the `speakers` dmix; roles player, metadata, controller, visualizer (8 log bands 40 Hz–7.6 kHz, loudness, beats → `MusicFrame`) |
 | `satellite/src/zigbee/` | Midi Zigbee radio: zbhci link to the Telink chip (`telink_link.*`), coordinator on pulsar's firmware + ZDO to the coordinator itself (`coordinator.*`), deCONZ-protocol TCP server for Zigbee2MQTT / ZHA (`deconz_server.*`), router control (`router.*`), `.ybl` parsing + XMODEM upload through the radio's bootloader (`flasher.*`), role / firmware orchestration (`service.*`), byte order helpers (`bytes.h`) |
 | `satellite/src/update/` | HA "Firmware" update entity backend: HTTPS on the firmware's OpenSSL (`https.*`, dlopen), GitHub release check / download / verify / swap (`updater.*`) |
-| `satellite/src/hw/` | LED ring / logo (framebuffers behind ledfb triggers; `leds.cpp`: output, case matrix, layer compositor, fades), pure rendering of voice states / one-shots / effects / music styles (`led_fx.*`), clock (sysfs segments), input (touch keys, `SW_MUTE_DEVICE`), light sensor (`ltr308als01`) |
+| `satellite/src/hw/` | LED ring / logo (framebuffers behind ledfb triggers; `leds.cpp`: output, case matrix, layer compositor, fades), pure rendering of voice states / one-shots / effects / music styles (`led_fx.*`), clock (sysfs segments, per-LED brightness; `clock.cpp`: layers), pure rendering of the clock's stock animations and music levels (`clock_fx.*`), input (touch keys, `SW_MUTE_DEVICE`), light sensor (`ltr308als01`) |
 | `satellite/src/controller.*` | all satellite logic: voice pipeline state machine, entities, local commands, persistence |
 | `satellite/src/arbiter.*` | `WakeArbiter`: wake word claims between stations (UDP broadcast :6054, 250 ms window), best claim answers |
 | `satellite/deploy/` | `dist.sh` (release archives, host side); `boot.sh`, `supervise.sh`, `ctl.sh` (device side) |
-| `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install, health check |
-| `satellite/tools/` | probes: `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `update_probe` (HTTPS client, release check, install into a scratch dir), `zigbee_probe` (Zigbee coordinator, either firmware, + deCONZ server on another port, without the daemon; `flash <image>` writes a radio image) |
+| `installer/` | `pulsar-install` (Go): station discovery (mDNS legacy-unicast query / `--scan` port scan), adb (downloads platform-tools 37.0.1 if missing), install (incl. `/etc/init.d/S99zpulsar`), health check |
+| `satellite/tools/` | probes: `hw_probe`, `player_probe`, `ww_offline` (offline spotter test on a WAV), `api_selftest`, `update_probe` (HTTPS client, release check, install into a scratch dir), `zigbee_probe` (Zigbee coordinator, either firmware, + deCONZ server on another port, without the daemon; `flash <image>` writes a radio image), `alsa_abi_probe` (ALSA hw-params ABI on the `null` PCM, no sound) |
 | `satellite/third_party/` | `fetch.sh` (pinned deps), `sysroot.sh` (alsa-lib link sysroot), CMake glue, zig toolchain wrappers |
 | `ssh/` | `build.sh` (static dropbear + sftp-server), `start.sh` (device side) |
 | `radio/` | Zigbee firmware for the Midi radio on the Telink Zigbee SDK: `build.sh` (pinned SDK + toolchain, `sdk.patch`), `Makefile`, `coordinator/` and `router/` (apps), `ybl.c` (host tool: binary → `.ybl`) |
@@ -90,14 +90,16 @@ force pushes or deletion; changes land through a pull request with green `build 
 `build (armhf)` checks, squash or rebase only (linear history). Work on a short-lived branch
 (`feat/…`, `fix/…`, `docs/…`), open a PR, merge; the branch is deleted on merge. Release tags `v*`
 cannot be moved or deleted. Nothing personal goes into the repository: no real IPs, MACs, serials,
-Wi-Fi names, tokens, device logs or names/e-mails in commits (`192.168.1.50` is the documentation
-placeholder).
+Wi-Fi names, tokens or device logs (`192.168.1.50` is the documentation placeholder). Commits made
+for the maintainer (including by agents) use `Morvex885
+<278529280+Morvex885@users.noreply.github.com>`, no real names or e-mails; contributors' commit
+identities are their own business (a squash merge takes the PR author's GitHub identity).
 
 ## Deploy
 
 ```sh
 go -C installer run . --list         # discover stations (mDNS; --scan = adb port scan of the /24) + model probe
-go -C installer run . <ip>[:port]    # build if needed, copy binary (+ .prev), add boot hook, restart
+go -C installer run . <ip>[:port]    # build if needed, copy binary (+ .prev), write /etc/init.d/S99zpulsar, restart
 ```
 
 Models are identified by `/proc/device-tree/compatible` (`yandex,<codename>`) both by the daemon
@@ -115,13 +117,17 @@ ssh root@<ip> 'cd /data/pulsar && cp pulsar pulsar.prev &&
 ```
 
 Device layout: `/data/pulsar/{pulsar,.prev,.bad,boot.sh,supervise.sh,
-ctl.sh,state.conf,api_key,enabled,sendspin/,zigbee-coordinator.ybl,zigbee-router.ybl}`. `api_key`: ESPHome Noise PSK (base64 of 32 bytes,
+ctl.sh,state.conf,api_key,enabled,sendspin/,zigbee-coordinator.ybl,zigbee-router.ybl}`. Outside /data:
+`/etc/init.d/S99zpulsar` (autostart, written by the installer). `api_key`: ESPHome Noise PSK (base64 of 32 bytes,
 0600), written by HA's auto-provisioning or `ctl.sh api-key`; absent = plaintext (Noise with the
 all-zeros key is then accepted so HA can provision); corrupt = API fails closed. `.bad`: binary
 replaced by the crash-loop rollback. Log: `/tmp/pulsar.log` (`ctl.sh log N`; rotated
-at 1 MB by `supervise.sh`, one `.1` kept). Boot chain:
-`onboot.sh` (firmware) → `/data/quasar/rootkeeper.sh` → `boot.sh` → waits for quasar, `q stop` →
-`supervise.sh` restart loop while `enabled` exists. `ctl.sh reload` restarts the supervisor itself
+at 1 MB by `supervise.sh`, one `.1` kept). Boot chain: busybox init → `rcS` (runs
+`/etc/init.d/S??*` in order with `start`, waiting for each) → `S97quasar` (Midi) / `S99quasar`
+(Lite 2) → `onboot.sh` (adbd via `activate_adb.sh check`, quasar in background; returns); then
+`S99zpulsar` (sorts after `S99quasar`; `S99pulsar` would not) → `boot.sh` in background (once per
+boot: `/tmp/pulsar-boot.lock`) → waits for quasar, `q stop` → `supervise.sh` restart loop while
+`enabled` exists. `ctl.sh reload` restarts the supervisor itself
 (needed after replacing `supervise.sh`; the installer does it when the script changed).
 
 Updates from HA (`src/update/`, entities "Firmware" + "Auto update"): the daemon checks
@@ -145,10 +151,18 @@ device whose HA already holds a key cannot talk to HA until the key is removed t
 
 ## Device safety rules
 
-- **Never break root adb access.** Do not touch adbd, `/data/quasar/activate_*` markers, or the
-  existing contents of `/data/quasar/rootkeeper.sh`. It is shared with other tooling: only insert
-  hook lines, and only before its endless `while` loop (code after the loop never runs).
-- Do not modify the rootfs (`/system`, `/etc`); everything persistent lives in `/data`.
+- **Never break root adb access.** Do not touch adbd, `/data/quasar/activate_*` markers or
+  `/data/quasar/rootkeeper.sh` (it belongs to the root method): the installer only removes the hook
+  lines older versions of it added there (`hookSat` / `hookSSH`) and never creates, deletes or
+  otherwise changes the file.
+- Do not modify the rootfs (`/system`, `/etc`); everything persistent lives in `/data`. The single
+  exception is `/etc/init.d/S99zpulsar`, written by the installer only after checking that the
+  rootfs is not protected (`/proc/cmdline` without `verity`/`dm=`, nothing but `control` in
+  `/dev/mapper`, `df /etc /system/vendor/quasar` on one filesystem mounted at `/`), with `/`
+  remounted rw only for the write and back to ro.
+- Protecting a station from Yandex firmware OTA is not pulsar's job (station owner / root method);
+  an OTA that replaces the system partition removes `S99zpulsar`, and re-running the installer
+  restores it.
 - Several devices may share one adb server: always pass `adb -s <serial>`.
 - `adb shell` on this firmware is a pty: output has `\r`, is not binary-safe (use push/pull) and
   the exit status is always 0 (see `sh()` in `installer/adb.go`).
@@ -315,20 +329,20 @@ carried over).
 
 | | Midi (`cucumber`) | Lite 2 (`plum`) |
 |---|---|---|
-| SoC / userland | Amlogic A5, aarch64, glibc 2.36, 1 GB RAM | Amlogic AXG, Cortex-A53, **32-bit armhf** userland, glibc 2.30, kernel 4.9, **237 MB RAM** |
+| SoC / userland | Amlogic A5, aarch64, glibc 2.36, 1 GB RAM; some firmware images run a 32-bit armhf userland with a versioned alsa-lib (the armhf build reaches its current ABI through `audio/alsa_abi.h`) | Amlogic AXG, Cortex-A53, **32-bit armhf** userland, glibc 2.30, kernel 4.9, **237 MB RAM** |
 | Storage | `/data` partition (several GB) | `/data` → `/bkupgrade/data` (ubifs, ~81 MB free); rootfs ubifs ro, 87 % full |
 | Capture | `hw:0,2`, 8 ch @ 96 kHz: mics 0–3, speaker ref 4–7 | `hw:0,1`, 8 ch @ 48 kHz: mic 0 on ch 0 (= ch 1), mic 1 on ch 2 (= ch 3), speaker feedback on ch 6; ch 4/5 only carry a start-up transient. Max buffer 2048 frames (~42 ms) |
 | VQE preset | `cucumber`: 4 mics, 4 spk, chunk 3072 | `plum`: 2 mics, 1 spk, 48 kHz, chunk 1536 → 512 @ 16 kHz; outputs 1, 2, 4, 6, 8, 9 |
 | Spotters | alisa: types 0, 3, 4; command: type 0 | alisa/yandex: types 0 and 4 (1 ch each); command: type 0. Models in `spotter_models/` are plum-tuned |
 | Ring | `/dev/fb0` 24×1 + `/dev/fb1` logo 6×1, BGR | `/dev/fb0` "YNDX LED ring" 3×1, 24 bpp, BGR; trigger `led_ring_fb`; sysfs `plum:<color>:ring1..3`; no logo |
-| Clock | `cucumber:white:clock-<seg><digit>`, dimming via chip `current` | `plum:white:clock<SEG><pos>`: A–G × 0–3, colon `DH`+`DL`; `H0..3`, `DM`, `DEGREE` kept dark (`quasar.cfg` `/leds/clock`); dimming via per-LED `brightness` 0–255 |
+| Clock | `cucumber:white:clock-<seg><digit>`, dimming via chip `current`; no centre dot | `plum:white:clock<SEG><pos>`: A–G × 0–3, colon `DH`+`DL`; `H0..3`, `DEGREE` kept dark (`quasar.cfg` `/leds/clock`); `DM` = centre dot at g height (`Model::clock_center`, extra LED 35 of the stock patterns [inference: position not confirmed by eye]); dimming via per-LED `brightness` 0–255 |
 | Keys | `awinic_sar`: 582 action, 115/114 volume | `aw9610x`: same codes |
 | Mic mute | input `mute`: `SW_MUTE_DEVICE` | input `gpio-keys`: `SW_MUTE_DEVICE` (+ `KEY_MUTE`) |
 | Light sensor | `ltr308als01` (iio) | same |
 | Volume | "Master Playback Volume" softvol on `speakers` | same names; `speakers` comes from `/etc/init.d/S45amplifier-settings` (`/tmp/asound-vol.conf`) |
 | alsa-lib | 1.2.10, versioned | 1.2.1.2, unversioned |
 | Earcons | `common/spotter_*.mp3`, `timer.wav`, `ru-RU/vins_error.wav` | same except `ru-RU/playback_error.mp3` instead of `vins_error.wav` |
-| Boot hook | `onboot.sh` → `/data/quasar/rootkeeper.sh` | same (line 67); `q stop` available |
+| Boot | `S97quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh` | `S99quasar` → `onboot.sh`; then `S99zpulsar` → `boot.sh`; `q stop` available |
 | Zigbee | Telink B91 on `/dev/ttyS2`, reset/boot via `zb_control` (see Zigbee radio) | none |
 
 Lite 2 measurements: echo test (speech played through `speakers`, raw capture → `ww_offline`):
@@ -340,9 +354,8 @@ Lite 2 LEDs: `led_ring_fb` scales each channel on its way to the LEDs; sysfs `br
 the framebuffer value × ~0.36 (red), ~0.23 (green), ~0.2 (blue), so ring colours checked through
 sysfs only match the Midi's after that correction (`/dev/fb0` holds the written B,G,R bytes).
 
-Not yet verified on the Lite 2: wake word → HA pipeline → TTS end to end, Sendspin playback, LED
-animations by eye. GStreamer playback of an HTTP WAV through the media player works (heard on the
-speaker reference by the music analysis).
+Verified on the Lite 2 by the owner: wake word → HA pipeline → TTS end to end, Sendspin and HA
+media playback, LED animations.
 
 ## Conventions
 
@@ -386,9 +399,22 @@ speaker reference by the music analysis).
   `RAW_MAIN_MIC_SYNC`), Midi vs Lite 2 level offset, broadcast delivery through the firmware's
   iptables and the access point.
 - Clock layers (`Clock::Impl::refresh`): pairing code (ignores the "Clock display" switch) > volume
-  flash > timer > temporary layer (`clock_show_text`/`clock_show_face` actions) > Text «Clock text» /
-  Select «Clock face» > time. Only the scroll speed is persisted (`clock_scroll_ms=`). Moving
-  content uses its own one-shot frame timer; the 5 s full segment rewrite counts 250 ms ticks only.
+  flash > voice state (TIMER_RING always, LISTENING / THINKING / SPEAKING with
+  `voice_indication=1`) > update install (dark from `install_update` until exit, back on failure) >
+  one-shot (boot on every start, player pause / next / previous) > timer > temporary layer
+  (`clock_show_text`/`clock_show_face` actions) > Text «Clock text» / Select «Clock face» > music
+  levels (Select «Clock music», `clock_music=`, default Off; media playing and frames fresh; the
+  time takes over 3 s of every 30 s; each digit spans its own recent range, 3 s time constant,
+  kept per source and reset after 10 s without that source) > time. "Clock display" off keeps
+  everything else dark.
+  Persisted: scroll speed (`clock_scroll_ms=`) and `clock_music=`. The animations are the stock
+  Lite 2 `ledpatterns/clock` patterns re-drawn in `clock_fx.cpp` (envelopes measured, ≤ 10/255
+  off; NEXT's column 1 is drawn symmetric where the stock one decays early); the Midi firmware ships
+  only `ringing`, pulsar shows the full set there too. Frames are per-LED brightness 0..255, scaled
+  by the level on the Lite 2 (Midi: chip current). Moving content re-arms a one-shot frame timer on
+  every refresh (20 ms animations, 40 ms meters); the 5 s full segment rewrite counts 250 ms ticks
+  only. Player one-shots fire only when the command took effect (`music_pause()` returns whether
+  something played; next / previous when Sendspin accepted the transport command).
 - LED layers (`Leds::Impl::active_layer`, first active wins): volume overlay (1.5 s) > voice state
   (ERROR runs its 3.54 s to the end, TIMER_RING; LISTENING / THINKING / SPEAKING only with
   `voice_indication=1`) > one-shots (mute sweep 600 ms over the timer-started countdown 15 s,
@@ -401,13 +427,18 @@ speaker reference by the music analysis).
   the stock raw value × k after the gamma-2 output. Output: `(v · ambient dim)²`, case matrix
   (`led_case_color=`, rows = output R, G, B [inference: orientation not confirmed by eye]), × 0.8.
   Effects and music move on a phase scaled by `led_speed=` (0.25–4). Music: Sendspin visualizer
-  frames win while they keep coming (300 ms), else the speaker-reference analysis, which only runs
-  while the visualization is shown (the light off). Not yet verified: Music Assistant actually
-  sending visualizer frames (sendspin-cli 8.0.0 with aiosendspin 9.1.1 fails the device's Noise
-  handshake, `psk_category` missing; with aiosendspin 10.2.1 forced it connects but never starts a
-  stream).
+  frames win while they keep coming (`kSendspinFreshMs` 500 ms, `audio/music_frame.h`, shared with
+  the clock), else the speaker-reference analysis, which only runs while the visualization is shown
+  (the light off). Music Assistant 2.10.8 (aiosendspin 10.2.1) sends visualizer frames (seen on
+  both stations), but ends and restarts the Sendspin stream on every seek / skip (its hidden
+  `allow_legacy_clients` option, on by default, against the spec's `stream/clear`), ~0.7 s
+  without audio and frames. `SendspinService` releases the sink at once but holds the reported
+  stream end 1 s unless the group state says "stopped" (pause / stop: just before or just after
+  the stream end), so a restart does not flap the HA media state, the command spotter and the
+  music displays.
 - `installer/` (Go) is the only host-side installer. Device commands are busybox-sh strings sent
   through `sh()` (adb shell plus `__rc=` marker; one command ≤ 4 KB on these firmwares).
   The host side uses only the Go stdlib and `golang.org/x/net`, no host tools except adb (plus
-  make / `ssh/build.sh` in a checkout). The rootkeeper edit (`planRootkeeper`) is covered by
-  `rootkeeper_test.go`; keep it pure.
+  make / `ssh/build.sh` in a checkout). The pure parts (init script `initScript`, rootfs check
+  `rootfsGuard` / `rootMountRW`, rootkeeper clean-up `unhookRootkeeper` / `hookActive` /
+  `checkRootkeeper`) are covered by `autostart_test.go` and `rootkeeper_test.go`; keep them pure.

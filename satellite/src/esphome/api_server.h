@@ -102,7 +102,7 @@ enum class BinarySensorId : uint32_t { HW_MIC_MUTE = 1 };
 // 0..100 %; 100..2000 ms; 0.25..4 ×
 enum class NumberId : uint32_t { CLOCK_BRIGHTNESS = 1, CLOCK_SCROLL = 2, LED_SPEED = 3 };
 enum class TextId : uint32_t { CLOCK_TEXT = 1 };
-enum class SelectId : uint32_t { CLOCK_FACE = 1, ZIGBEE_MODE = 2, MUSIC_VIZ = 3, CASE_COLOR = 4, LED_STYLE = 5, QUICK_COMMANDS = 6, BLUETOOTH_TYPE = 7 };
+enum class SelectId : uint32_t { CLOCK_FACE = 1, ZIGBEE_MODE = 2, MUSIC_VIZ = 3, CASE_COLOR = 4, LED_STYLE = 5, QUICK_COMMANDS = 6, BLUETOOTH_TYPE = 7, CLOCK_MUSIC = 8 };
 enum class ButtonId : uint32_t { ZIGBEE_JOIN = 1, ZIGBEE_LEAVE = 2 };
 enum class TextSensorId : uint32_t { ZIGBEE = 1 };
 enum class ActionId : uint32_t { CLOCK_SHOW_TEXT = 1, CLOCK_SHOW_FACE = 2 };  // args (text|face, seconds)
@@ -179,6 +179,7 @@ struct ApiConfig {
   std::vector<std::string> quick_commands;        // Select «Quick commands» options
   bool has_clock = true;                          // 7-segment clock entities
   bool has_case_color = true;                     // Select «Case color»
+  std::vector<std::string> clock_music_styles;    // Select «Clock music» options
   // Select «Zigbee role» options; empty: no Zigbee entities (no radio).
   std::vector<std::string> zigbee_modes;
   // File holding the Noise encryption key (base64 of 32 bytes, as in ESPHome's api: encryption:

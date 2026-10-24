@@ -40,8 +40,9 @@ struct Settings {
   bool auto_update = false;    // install new releases without asking
   bool nearest_answers = true; // wake arbitration with other pulsar stations
   std::string music_viz = "All styles";  // one of Leds::music_styles()
+  std::string clock_music = "Off";       // one of Clock::music_styles()
   float led_speed = 1;             // 0.25..4
-  bool voice_indication = true;    // listening / thinking / speaking shown on the ring
+  bool voice_indication = true;    // listening / thinking / speaking shown on the ring and the clock
   std::string led_case_color;      // stem of Leds::case_colors(), "" = none
   std::string quick_commands = "playing";  // playing | always | off: commands without the wake word
   bool sendspin = true;   // Sendspin player (Music Assistant); a switch on the panel model
@@ -99,7 +100,7 @@ class Controller : public ApiHooks {
   bool arbitration_on() const { return st_.nearest_answers && arbiter_ok_; }
   void on_command(const std::string &word);
   void update_commands();
-  void music_pause();
+  bool music_pause();  // true when something was playing
   void music_resume();
   void start_pipeline(const std::string &phrase, bool earcon, std::vector<int16_t> preroll = {});
   void stop_streaming();
@@ -117,6 +118,7 @@ class Controller : public ApiHooks {
   void resume_ring();
   void show_timers();
   void update_ui();
+  void show_ui(UiState s);  // ring and clock
   void update_detection();
   void update_duck();
   void apply_gains();

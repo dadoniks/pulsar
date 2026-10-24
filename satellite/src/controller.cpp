@@ -98,6 +98,7 @@ bool Settings::load(const std::string &path) {
     else if (k == "zigbee_role") zigbee_role = ZigbeeService::parse_mode(v);
     else if (k == "zigbee_flash_failed") zigbee_flash_failed = uint32_t(strtoul(v.c_str(), nullptr, 16));
     else if (k == "music_viz") music_viz = v;
+    else if (k == "clock_music") clock_music = v;
     else if (k == "led_speed") led_speed = std::isfinite(fv) ? std::clamp(fv, 0.25f, 4.f) : 1.f;
     else if (k == "voice_indication") voice_indication = v == "1";
     else if (k == "led_case_color") led_case_color = v;
@@ -109,6 +110,8 @@ bool Settings::load(const std::string &path) {
   }
   const auto &styles = Leds::music_styles();
   if (std::find(styles.begin(), styles.end(), music_viz) == styles.end()) music_viz = "All styles";
+  const auto &clock_styles = Clock::music_styles();
+  if (std::find(clock_styles.begin(), clock_styles.end(), clock_music) == clock_styles.end()) clock_music = "Off";
   return true;
 }
 
@@ -129,7 +132,9 @@ void Settings::save(const std::string &path) const {
       << "\nzigbee_role=" << ZigbeeService::role(zigbee_role).name << "\nzigbee_flash_failed=" << std::hex
       << zigbee_flash_failed << std::dec << "\nnearest_answers=" << nearest_answers << "\nmusic_viz=" << music_viz
       << "\nled_speed=" << led_speed << "\nvoice_indication=" << voice_indication
-      << "\nled_case_color=" << led_case_color << "\nquick_commands=" << quick_commands << "\nsendspin=" << sendspin << "\nbt_type=" << bt_type << "\nled_style=" << led_style << "\nzigbee_ncp=" << zigbee_ncp << "\n";
+      << "\nled_case_color=" << led_case_color << "\nquick_commands=" << quick_commands << "\nsendspin=" << sendspin
+      << "\nbt_type=" << bt_type << "\nled_style=" << led_style << "\nzigbee_ncp=" << zigbee_ncp
+      << "\nclock_music=" << clock_music << "\n";
   }
   rename(tmp.c_str(), path.c_str());
 }
@@ -194,6 +199,7 @@ bool Controller::start() {
     cfg.has_case_color = false;
   }
   cfg.music_styles = Leds::music_styles();
+  cfg.clock_music_styles = Clock::music_styles();
   cfg.case_colors = {"None"};
   const auto case_colors = Leds::case_colors();
   cfg.case_colors.insert(cfg.case_colors.end(), case_colors.begin(), case_colors.end());
@@ -214,6 +220,8 @@ bool Controller::start() {
   clock_.set_enabled(st_.clock_on);
   clock_.set_brightness(st_.clock_brightness);
   clock_.set_scroll_ms(st_.clock_scroll_ms);
+  clock_.set_voice_indication(st_.voice_indication);
+  clock_.set_music_style(st_.clock_music);
   leds_.set_speed(st_.led_speed);
   leds_.set_voice_indication(st_.voice_indication);
   leds_.set_music_style(st_.music_viz);
@@ -323,7 +331,10 @@ bool Controller::start() {
     else if (arbitrating_)  // the request goes on with what was said right after the wake word
       arb_audio_.insert(arb_audio_.end(), pcm, pcm + n);
   });
-  mic_.on_music([this](const MusicFrame &f) { leds_.music_frame(f, false); });
+  mic_.on_music([this](const MusicFrame &f) {
+    leds_.music_frame(f, false);
+    clock_.music_frame(f, false);
+  });
   if (!mic_.start(model_dir(st_.wake_word), kCommandModel)) LOGE("microphone front-end failed to start");
   update_detection();
 
@@ -346,6 +357,8 @@ bool Controller::start() {
     bt_->start();
   }
   update_ui();
+  // Last: start() blocks the loop (Midi ~0.4 s), which would swallow the eyes opening.
+  clock_.play(ClockShot::BOOT);
   return true;
 }
 
@@ -381,6 +394,7 @@ void Controller::on_client_connected(const std::string &client_info) {
     api_->publish_select(SelectId::BLUETOOTH_TYPE, st_.bt_type);
   }
   api_->publish_select(SelectId::LED_STYLE, st_.led_style);
+  if (!model_.panel) api_->publish_select(SelectId::CLOCK_MUSIC, st_.clock_music);
   api_->publish_select(SelectId::CASE_COLOR, st_.led_case_color.empty() ? "None" : st_.led_case_color);
   if (!model_.ncp_tty.empty()) {
     api_->publish_select(SelectId::ZIGBEE_MODE, ncp_label());
@@ -504,7 +518,7 @@ void Controller::start_pipeline(const std::string &phrase, bool earcon, std::vec
   cancel_arbitration();  // the button, a continued conversation or HA's start_conversation win
   if (!api_->voice_subscribed()) {
     LOGW("wake ignored: Home Assistant voice assistant not subscribed");
-    leds_.set_ui_state(UiState::ERROR);
+    show_ui(UiState::ERROR);
     loop_.add_timer(1500, [this] { update_ui(); });
     return;
   }
@@ -600,7 +614,7 @@ void Controller::on_voice_event(VaEvent type, const std::map<std::string, std::s
       LOGW("pipeline error: %s %s", get("code").c_str(), get("message").c_str());
       stop_streaming();
       error_shown_ = true;
-      leds_.set_ui_state(UiState::ERROR);
+      show_ui(UiState::ERROR);
       if (get("code") != "stt-no-text-recognized") play_closing_earcon(kSounds + model_.error_sound);
       break;
     case VaEvent::RUN_END:
@@ -662,7 +676,7 @@ void Controller::finish_interaction() {
 void Controller::abort_dialog(const char *why) {
   LOGW("voice pipeline: %s", why);
   error_shown_ = true;
-  leds_.set_ui_state(UiState::ERROR);
+  show_ui(UiState::ERROR);
   finish_interaction();
 }
 
@@ -891,7 +905,10 @@ void Controller::start_sendspin(const DeviceIdentity &id) {
     if (open) clock_.show_code("----");
     else clock_.clear_code();
   };
-  h.on_music = [this](const MusicFrame &f) { leds_.music_frame(f, true); };
+  h.on_music = [this](const MusicFrame &f) {
+    leds_.music_frame(f, true);
+    clock_.music_frame(f, true);
+  };
   sendspin_ = std::make_unique<SendspinService>(loop_, std::move(cfg), std::move(h));
   if (!(st_.sendspin || !model_.panel) || !sendspin_->start(st_.volume, st_.muted)) {
     LOGE("Sendspin player unavailable");
@@ -1013,8 +1030,10 @@ void Controller::update_music() {
   const bool media =
       ps == PlayState::PLAYING || ps == PlayState::LOADING || (sendspin_ && sendspin_->streaming());
   leds_.set_media_playing(media);
+  clock_.set_media_playing(media);
   // The speaker-reference analysis only runs while its result can be shown.
-  mic_.set_music_analysis(media && st_.music_viz != "Off" && !st_.light.on);
+  mic_.set_music_analysis(media && ((st_.music_viz != "Off" && !st_.light.on) ||
+                                    (st_.clock_music != "Off" && st_.clock_on)));
 }
 
 void Controller::on_media_command(const MediaCommandRequest &cmd) {
@@ -1046,17 +1065,23 @@ void Controller::on_media_command(const MediaCommandRequest &cmd) {
         player_.resume(Channel::MUSIC);
         break;
       case MediaCommand::PAUSE:
+        if (ss_on || player_.state(Channel::MUSIC) == PlayState::PLAYING ||
+            player_.state(Channel::MUSIC) == PlayState::LOADING)
+          clock_.play(ClockShot::PAUSE);
         // While Sendspin plays, HA's pause/stop leave the Sendspin group (the speaker stops).
         if (ss_on && player_.state(Channel::MUSIC) != PlayState::PLAYING) sendspin_->yield_to_local();
         player_.pause(Channel::MUSIC);
         break;
       case MediaCommand::TOGGLE:
-        if (player_.state(Channel::MUSIC) == PlayState::PLAYING)
+        if (player_.state(Channel::MUSIC) == PlayState::PLAYING) {
+          clock_.play(ClockShot::PAUSE);
           player_.pause(Channel::MUSIC);
-        else if (ss_on)
+        } else if (ss_on) {
+          clock_.play(ClockShot::PAUSE);
           sendspin_->yield_to_local();
-        else
+        } else {
           player_.resume(Channel::MUSIC);
+        }
         break;
       case MediaCommand::STOP:
         player_.stop(Channel::MUSIC);
@@ -1104,6 +1129,7 @@ void Controller::on_switch(SwitchId id, bool state) {
   } else if (id == SwitchId::CLOCK) {
     st_.clock_on = state;
     clock_.set_enabled(state);
+    update_music();
   } else if (id == SwitchId::AUTO_UPDATE) {
     st_.auto_update = state;
   } else if (id == SwitchId::NEAREST_ANSWERS) {
@@ -1111,6 +1137,7 @@ void Controller::on_switch(SwitchId id, bool state) {
   } else if (id == SwitchId::VOICE_INDICATION) {
     st_.voice_indication = state;
     leds_.set_voice_indication(state);
+    clock_.set_voice_indication(state);
   } else if (id == SwitchId::SENDSPIN) {
     st_.sendspin = state;
     api_->publish_switch(id, state);
@@ -1204,6 +1231,7 @@ void Controller::install_update(const char *why) {
   st_.update_attempt = r.version;
   persist();
   update_installing_ = true;
+  clock_.set_updating(true);
   update_progress_ = 0;
   publish_update();
   updater_.install(
@@ -1222,6 +1250,7 @@ void Controller::install_update(const char *why) {
         }
         LOGE("update to %s failed: %s", r.version.c_str(), err.c_str());
         update_installing_ = false;
+        clock_.set_updating(false);
         if (!fatal) {  // a network failure: the next check tries again
           st_.update_attempt.clear();
           persist();
@@ -1326,6 +1355,14 @@ void Controller::on_select(SelectId id, const std::string &option) {
     persist();
     return;
   }
+  if (id == SelectId::CLOCK_MUSIC) {
+    st_.clock_music = option;
+    clock_.set_music_style(option);
+    api_->publish_select(id, option);
+    persist();
+    update_music();
+    return;
+  }
   if (id == SelectId::CASE_COLOR) {
     const std::string stem = option == "None" ? "" : option;
     st_.led_case_color = leds_.set_case_color(stem) ? stem : "";
@@ -1415,10 +1452,17 @@ void Controller::update_commands() {
   mic_.set_commands(!st_.mic_muted && !hw_mic_muted_ && (quick || after_wake));
 }
 
-void Controller::music_pause() {
-  if (player_.state(Channel::MUSIC) == PlayState::PLAYING || player_.state(Channel::MUSIC) == PlayState::LOADING)
+bool Controller::music_pause() {
+  bool paused = false;
+  if (player_.state(Channel::MUSIC) == PlayState::PLAYING || player_.state(Channel::MUSIC) == PlayState::LOADING) {
     player_.pause(Channel::MUSIC);
-  if (sendspin_ && sendspin_->streaming()) sendspin_->transport(SendspinService::Transport::PAUSE);
+    paused = true;
+  }
+  if (sendspin_ && sendspin_->streaming()) {
+    sendspin_->transport(SendspinService::Transport::PAUSE);
+    paused = true;
+  }
+  return paused;
 }
 
 void Controller::music_resume() {
@@ -1494,11 +1538,11 @@ void Controller::on_command(const std::string &word) {
         update_duck();
         update_ui();
       } else {
-        music_pause();
+        if (music_pause()) clock_.play(ClockShot::PAUSE);
       }
       break;
     case PAUSE:
-      music_pause();
+      if (music_pause()) clock_.play(ClockShot::PAUSE);
       break;
     case RESUME:
       music_resume();
@@ -1509,8 +1553,10 @@ void Controller::on_command(const std::string &word) {
       break;
     case NEXT:
     case PREV:
-      if (!sendspin_ || !sendspin_->transport(c == NEXT ? SendspinService::Transport::NEXT
-                                                         : SendspinService::Transport::PREVIOUS))
+      if (sendspin_ && sendspin_->transport(c == NEXT ? SendspinService::Transport::NEXT
+                                                      : SendspinService::Transport::PREVIOUS))
+        clock_.play(c == NEXT ? ClockShot::NEXT : ClockShot::PREVIOUS);
+      else
         LOGI("'%s' ignored: no Sendspin queue to skip in", word.c_str());
       break;
     case NONE:
@@ -1522,20 +1568,25 @@ void Controller::on_command(const std::string &word) {
 void Controller::update_ui() {
   leds_.set_muted(st_.mic_muted || hw_mic_muted_);
   update_commands();
-  if (timer_ringing_) return leds_.set_ui_state(UiState::TIMER_RING);
+  if (timer_ringing_) return show_ui(UiState::TIMER_RING);
   switch (phase_) {
     case Phase::LISTENING:
-      return leds_.set_ui_state(UiState::LISTENING);
+      return show_ui(UiState::LISTENING);
     case Phase::PROCESSING:
-      return leds_.set_ui_state(UiState::THINKING);
+      return show_ui(UiState::THINKING);
     case Phase::SPEAKING:
-      return leds_.set_ui_state(UiState::SPEAKING);
+      return show_ui(UiState::SPEAKING);
     case Phase::IDLE:
       break;
   }
-  if (arbitrating_) return leds_.set_ui_state(UiState::LISTENING);
-  if (announcing_) return leds_.set_ui_state(UiState::SPEAKING);
-  leds_.set_ui_state(UiState::IDLE);
+  if (arbitrating_) return show_ui(UiState::LISTENING);
+  if (announcing_) return show_ui(UiState::SPEAKING);
+  show_ui(UiState::IDLE);
+}
+
+void Controller::show_ui(UiState s) {
+  leds_.set_ui_state(s);
+  clock_.set_ui_state(s);
 }
 
 }  // namespace cs

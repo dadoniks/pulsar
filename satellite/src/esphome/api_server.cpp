@@ -136,6 +136,7 @@ enum Key : uint32_t {
   K_EVENT_VOICE_COMMAND = 34,
   K_SELECT_BT_TYPE = 35,
   K_SW_SENDSPIN = 36,
+  K_SELECT_CLOCK_MUSIC = 37,
 };
 
 // aioesphomeapi VoiceAssistantFeature bits.
@@ -376,7 +377,8 @@ struct ApiServer::Impl {
   UpdateState update;
   bool update_has = false;
   FloatState lux, clock_bri, clock_scroll, led_speed;
-  StrState clock_text, clock_face, zigbee_mode, zigbee_status, music_viz, case_color, led_style, quick_commands, bt_type;
+  StrState clock_text, clock_face, zigbee_mode, zigbee_status, music_viz, case_color, led_style, quick_commands, bt_type,
+      clock_music;
   LightState light;
   // Diagnostics, refreshed by diag_timer.
   FloatState rssi;
@@ -1402,6 +1404,9 @@ struct ApiServer::Impl {
                     cfg.quick_commands);
     if (!cfg.led_styles.empty())
       select_entity("led_style", K_SELECT_LED_STYLE, "LED style", "mdi:led-strip-variant", cfg.led_styles);
+    if (cfg.has_clock)
+      select_entity("clock_music", K_SELECT_CLOCK_MUSIC, "Clock music", "mdi:equalizer-outline",
+                    cfg.clock_music_styles);
     {
       pb::Writer w;
       entity_head(w, "firmware", K_UPDATE, "Firmware");
@@ -1640,6 +1645,7 @@ struct ApiServer::Impl {
     if (!cfg.quick_commands.empty())
       send_str(SELECT_STATE, K_SELECT_QUICK_COMMANDS, quick_commands.v, quick_commands.has, c);
     if (!cfg.led_styles.empty()) send_str(SELECT_STATE, K_SELECT_LED_STYLE, led_style.v, led_style.has, c);
+    if (cfg.has_clock) send_str(SELECT_STATE, K_SELECT_CLOCK_MUSIC, clock_music.v, clock_music.has, c);
     if (!cfg.zigbee_modes.empty()) {
       send_str(SELECT_STATE, K_SELECT_ZIGBEE_MODE, zigbee_mode.v, zigbee_mode.has, c);
     }
@@ -1808,6 +1814,12 @@ struct ApiServer::Impl {
       for (const auto &o : cfg.led_styles)
         if (o == s) return hooks.on_select(SelectId::LED_STYLE, s);
       LOGW("api: unknown LED style '%s'", s.c_str());
+      return;
+    }
+    if (key == K_SELECT_CLOCK_MUSIC) {
+      for (const auto &o : cfg.clock_music_styles)
+        if (o == s) return hooks.on_select(SelectId::CLOCK_MUSIC, s);
+      LOGW("api: unknown clock music '%s'", s.c_str());
       return;
     }
     if (key == K_SELECT_MUSIC_VIZ || key == K_SELECT_CASE_COLOR) {
@@ -2074,6 +2086,7 @@ void ApiServer::publish_select(SelectId id, const std::string &state) {
     case SelectId::LED_STYLE: s = &impl_->led_style; key = K_SELECT_LED_STYLE; break;
     case SelectId::BLUETOOTH_TYPE: s = &impl_->bt_type; key = K_SELECT_BT_TYPE; break;
     case SelectId::QUICK_COMMANDS: s = &impl_->quick_commands; key = K_SELECT_QUICK_COMMANDS; break;
+    case SelectId::CLOCK_MUSIC: s = &impl_->clock_music; key = K_SELECT_CLOCK_MUSIC; break;
   }
   if (!s) return;
   *s = {true, state};
